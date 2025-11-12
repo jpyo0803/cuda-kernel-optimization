@@ -13,6 +13,7 @@ add_library(cuda_matmul_lib STATIC
     src/matmul_1d_block_tiling.cu
     src/matmul_2d_block_tiling.cu
     src/matmul_smem_vectorize.cu
+    src/matmul_warp_tiling.cu
 )
 
 # Add project header directory

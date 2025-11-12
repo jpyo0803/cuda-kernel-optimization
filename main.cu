@@ -10,6 +10,7 @@
 #include "matmul_1d_block_tiling.h"
 #include "matmul_2d_block_tiling.h"
 #include "matmul_smem_vectorize.h"
+#include "matmul_warp_tiling.h"
 
 using namespace std;
 using namespace jpyo0803;
@@ -100,6 +101,14 @@ MatmulResult DoMatmulWithSmemVectorize(const vector<float>& A,
   return matmul->DoMatmul(A, B, M, K, N);
 }
 
+MatmulResult DoMatmulWithWarpTiling(const vector<float>& A,
+                                    const vector<float>& B, int M, int K,
+                                    int N) {
+  unique_ptr<jpyo0803::MatmulBase> matmul =
+      make_unique<jpyo0803::MatmulWarpTiling>();
+  return matmul->DoMatmul(A, B, M, K, N);
+}
+
 }  // namespace
 
 int main() {
@@ -125,6 +134,7 @@ int main() {
   MatmulResult result_1d_block_tiling = DoMatmulWith1DBlockTiling(A, B, M, K, N);
   MatmulResult result_2d_block_tiling = DoMatmulWith2DBlockTiling(A, B, M, K, N);
   MatmulResult result_smem_vectorize = DoMatmulWithSmemVectorize(A, B, M, K, N);
+  MatmulResult result_warp_tiling = DoMatmulWithWarpTiling(A, B, M, K, N);
 
   bool correct_naive = VerifyResult(result_naive.C, result_cublas.C, M, N);
   bool correct_coalescing =
@@ -137,6 +147,8 @@ int main() {
       VerifyResult(result_2d_block_tiling.C, result_cublas.C, M, N);
   bool correct_smem_vectorize =
       VerifyResult(result_smem_vectorize.C, result_cublas.C, M, N);
+  bool correct_warp_tiling =
+      VerifyResult(result_warp_tiling.C, result_cublas.C, M, N);
 
   DisplayResult("Naive", result_naive, result_cublas);
   DisplayResult("Coalescing", result_coalescing, result_cublas);
@@ -144,6 +156,7 @@ int main() {
   DisplayResult("1D Block Tiling", result_1d_block_tiling, result_cublas);
   DisplayResult("2D Block Tiling", result_2d_block_tiling, result_cublas);
   DisplayResult("Shared Memory Vectorize", result_smem_vectorize, result_cublas);
+  DisplayResult("Warp Tiling", result_warp_tiling, result_cublas);
 
   return 0;
 }
