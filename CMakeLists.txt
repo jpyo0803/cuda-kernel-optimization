@@ -11,6 +11,7 @@ add_library(cuda_matmul_lib STATIC
     src/matmul_coalescing.cu
     src/matmul_smem_block.cu
     src/matmul_1d_block_tiling.cu
+    src/matmul_2d_block_tiling.cu
 )
 
 # Add project header directory
@@ -25,6 +26,6 @@ set_target_properties(cuda_matmul_lib PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-add_executable(cuda_matmul_demo main.cu)
+add_executable(cuda_matmul_benchmark main.cu)
 
-target_link_libraries(cuda_matmul_demo PRIVATE cuda_matmul_lib)
+target_link_libraries(cuda_matmul_benchmark PRIVATE cuda_matmul_lib)
