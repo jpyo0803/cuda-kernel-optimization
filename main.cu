@@ -1,50 +1,82 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+#include <random>
 
 #include "matmul_cublas.h"
+#include "matmul_naive.h"
 
 using namespace std;
+using namespace jpyo0803;
 
-int main() {
-  // clang-format off
-    vector<float> A = {
-        1.0f, 2.0f, 3.0f,
-        4.0f, 5.0f, 6.0f
-    }; // 2x3 matrix
-    vector<float> B = {
-        7.0f, 8.0f, 9.0f, 10.0f,
-        11.0f, 12.0f, 13.0f, 14.0f,
-        15.0f, 16.0f, 17.0f, 18.0f
-    }; // 3x4 matrix
-  // clang-format on
 
-  int M = 2;
-  int K = 3;
-  int N = 4;
+namespace {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_real_distribution<> dis(-10.0, 10.0);
 
-  unique_ptr<jpyo0803::MatmulBase> matmul =
-      make_unique<jpyo0803::MatmulCublas>();
-  jpyo0803::MatmulResult C = matmul->DoMatmul(A, B, M, K, N);
-
-  cout << "Result Matrix C (" << M << "x" << N << "):" << endl;
-  for (int i = 0; i < M; ++i) {
-    for (int j = 0; j < N; ++j) {
-      cout << C.C[i * N + j] << " ";
-    }
-    cout << endl;
+  float GenerateRandomFloat() {
+    return static_cast<float>(dis(gen));
   }
 
-  /*
-    Expected Output:
-    Result Matrix C (2x4):
-    74 80 86 92
-    173 188 203 218
-  */
+  bool VerifyResult(const vector<float>& C, const vector<float>& C_ref,
+                    int M, int N) {
+    constexpr float kEpsilon = 1e-1f;
+    for (int i = 0; i < M * N; ++i) {
+      if (fabs(C[i] - C_ref[i]) > kEpsilon) {
+        cerr << "Mismatch at index " << i << ": " << C[i]
+             << " (computed) vs " << C_ref[i] << " (reference)\n";
+        return false;
+      }
+    }
+    return true;
+  }
 
-  cout << "Host to Device Time: " << C.h2d_time_ms << " ms" << endl;
-  cout << "Computation Time: " << C.compute_time_ms << " ms" << endl;
-  cout << "Device to Host Time: " << C.d2h_time_ms << " ms" << endl;
+  void DisplayResult(string tag, const MatmulResult& result, const MatmulResult& ref) {
+    cout << "[" << tag << "] correct: " << (VerifyResult(result.C, ref.C, ref.C.size() / ref.C.size(), ref.C.size()) ? "O" : "X")
+         << ", Naive Time: " << result.compute_time_ms << " ms, Cublas Time: " << ref.compute_time_ms << " ms, Speedup: "
+         << ref.compute_time_ms / result.compute_time_ms * 100.0 << " %" << endl; 
+  }
+  
+  MatmulResult DoMatmulWithCublas(const vector<float>& A, const vector<float>& B,
+                              int M, int K, int N) {
+    unique_ptr<jpyo0803::MatmulBase> matmul =
+        make_unique<jpyo0803::MatmulCublas>();
+    return matmul->DoMatmul(A, B, M, K, N);
+  }
+  
+  MatmulResult DoMatmulWithNaive(const vector<float>& A, const vector<float>& B,
+                             int M, int K, int N) {
+    unique_ptr<jpyo0803::MatmulBase> matmul =
+        make_unique<jpyo0803::MatmulNaive>();
+    return matmul->DoMatmul(A, B, M, K, N);
+  }
+} // namespace
+
+
+int main() {
+  int M = 2048;
+  int K = 2048;
+  int N = 2048;
+
+  vector<float> A(M * K);
+  vector<float> B(K * N);
+
+  // Initialize matrices A and B with some values
+  for (int i = 0; i < M * K; ++i) {
+    A[i] = GenerateRandomFloat();
+  }
+  for (int i = 0; i < K * N; ++i) {
+    B[i] = GenerateRandomFloat();
+  }
+
+  MatmulResult result_cublas = DoMatmulWithCublas(A, B, M, K, N);
+  MatmulResult result_naive = DoMatmulWithNaive(A, B, M, K, N);
+
+  bool correct_naive =
+      VerifyResult(result_naive.C, result_cublas.C, M, N);
+
+  DisplayResult("Naive", result_naive, result_cublas);
 
   return 0;
 }

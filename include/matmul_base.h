@@ -4,6 +4,8 @@
 
 namespace jpyo0803 {
 
+constexpr int CeilDiv(int a, int b) { return (a + b - 1) / b; }
+
 struct MatmulResult {
   std::vector<float> C;
   float h2d_time_ms = 0.0f;      // Host to Device transfer time

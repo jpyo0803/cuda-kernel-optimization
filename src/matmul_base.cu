@@ -4,8 +4,8 @@
 
 namespace jpyo0803 {
 
-MatmulResult MatmulBase::DoMatmul(const std::vector<float>& A,
-                                  const std::vector<float>& B, int M, int K,
+MatmulResult MatmulBase::DoMatmul(const std::vector<float> &A,
+                                  const std::vector<float> &B, int M, int K,
                                   int N) {
   assert(A.size() == M * K);
   assert(B.size() == K * N);
@@ -41,8 +41,8 @@ MatmulResult MatmulBase::DoMatmul(const std::vector<float>& A,
   return result;
 }
 
-void MatmulBase::UploadData(const std::vector<float>& A,
-                            const std::vector<float>& B, int M, int K, int N) {
+void MatmulBase::UploadData(const std::vector<float> &A,
+                            const std::vector<float> &B, int M, int K, int N) {
   cudaMalloc(&d_A, M * K * sizeof(float));
   cudaMalloc(&d_B, K * N * sizeof(float));
   cudaMalloc(&d_C, M * N * sizeof(float));
@@ -50,7 +50,7 @@ void MatmulBase::UploadData(const std::vector<float>& A,
   cudaMemcpy(d_B, B.data(), K * N * sizeof(float), cudaMemcpyHostToDevice);
 }
 
-void MatmulBase::DownloadData(std::vector<float>& C, int M, int N) {
+void MatmulBase::DownloadData(std::vector<float> &C, int M, int N) {
   cudaMemcpy(C.data(), d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
 }
 

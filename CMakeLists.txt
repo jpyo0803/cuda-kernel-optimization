@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(cuda_matmul_lib STATIC
     src/matmul_base.cu
     src/matmul_cublas.cu
+    src/matmul_naive.cu
 )
 
 # Add project header directory
