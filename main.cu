@@ -5,6 +5,7 @@
 
 #include "matmul_cublas.h"
 #include "matmul_naive.h"
+#include "matmul_coalescing.h"
 
 using namespace std;
 using namespace jpyo0803;
@@ -51,6 +52,13 @@ namespace {
         make_unique<jpyo0803::MatmulNaive>();
     return matmul->DoMatmul(A, B, M, K, N);
   }
+
+  MatmulResult DoMatmulWithCoalescing(const vector<float>& A, const vector<float>& B,
+                             int M, int K, int N) {
+    unique_ptr<jpyo0803::MatmulBase> matmul =
+        make_unique<jpyo0803::MatmulCoalescing>();
+    return matmul->DoMatmul(A, B, M, K, N);
+  }
 } // namespace
 
 
@@ -72,11 +80,15 @@ int main() {
 
   MatmulResult result_cublas = DoMatmulWithCublas(A, B, M, K, N);
   MatmulResult result_naive = DoMatmulWithNaive(A, B, M, K, N);
+  MatmulResult result_coalescing = DoMatmulWithCoalescing(A, B, M, K, N);
 
   bool correct_naive =
       VerifyResult(result_naive.C, result_cublas.C, M, N);
+  bool correct_coalescing =
+      VerifyResult(result_coalescing.C, result_cublas.C, M, N);
 
   DisplayResult("Naive", result_naive, result_cublas);
+  DisplayResult("Coalescing", result_coalescing, result_cublas);
 
   return 0;
 }

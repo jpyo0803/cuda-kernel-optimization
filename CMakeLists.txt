@@ -8,6 +8,7 @@ add_library(cuda_matmul_lib STATIC
     src/matmul_base.cu
     src/matmul_cublas.cu
     src/matmul_naive.cu
+    src/matmul_coalescing.cu
 )
 
 # Add project header directory
