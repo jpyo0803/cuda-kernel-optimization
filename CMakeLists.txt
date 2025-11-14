@@ -28,6 +28,6 @@ set_target_properties(cuda_matmul_lib PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-add_executable(cuda_matmul_benchmark main.cu)
+add_executable(benchmark benchmark.cu)
 
-target_link_libraries(cuda_matmul_benchmark PRIVATE cuda_matmul_lib)
+target_link_libraries(benchmark PRIVATE cuda_matmul_lib)
