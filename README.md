@@ -1,3 +1,9 @@
+## How to run example
+```sh
+$ cd docker && docker-compose up
+```
+
+## CUDA SGEMM Kernel Optimization
 CUDA 프로그래밍 모델은 계층적 병렬 실행 구조를 기반으로 한다.  
 연산은 크게 **Grid → Block → Thread**의 3계층으로 나누어진다.  
 (하드웨어적으로는 이 사이에 Warp 계층이 더 존재하지만, CUDA 코드에는 직접 등장하지 않는다.)

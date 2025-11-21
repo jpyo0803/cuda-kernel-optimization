@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  cuda-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: cuda-dev-local
+    container_name: cuda-kernel-dev
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+    command: >
+      bash -c "
+        if [ ! -d /workspace/cuda-kernel-optimization ]; then
+          git clone https://github.com/jpyo0803/cuda-kernel-optimization.git /workspace/cuda-kernel-optimization;
+        fi &&
+        cd /workspace/cuda-kernel-optimization &&
+        mkdir -p build &&
+        cd build &&
+        cmake .. &&
+        make -j$(nproc) &&
+        ./benchmark
+      "
+
+    working_dir: /workspace
+
+    stdin_open: true
+    tty: true
