@@ -1,37 +1,55 @@
-## How to run example
-```sh
-$ cd docker && docker-compose up
-```
+## CUDA SGEMM 커널 최적화 프로젝트 소개
+SGEMM(Single-precision General Matrix Multiplication)은 딥러닝 모델의 학습과 추론 과정에서 가장 큰 비중을 차지하는 연산입니다. 대부분의 신경망 연산은 내부적으로 행렬 곱셈으로 변환되어 처리되므로, SGEMM의 성능은 곧 전체 시스템의 처리량(Throughput)과 직결됩니다.
 
-## CUDA SGEMM Kernel Optimization
-CUDA 프로그래밍 모델은 계층적 병렬 실행 구조를 기반으로 한다.  
-연산은 크게 **Grid → Block → Thread**의 3계층으로 나누어진다.  
-(하드웨어적으로는 이 사이에 Warp 계층이 더 존재하지만, CUDA 코드에는 직접 등장하지 않는다.)
+행렬 곱셈은 연산 밀도가 높고 메모리 접근 패턴이 규칙적이기 때문에, CUDA 프로그래밍의 다양한 최적화 기법을 적용하고 그 효과를 실험하기에 가장 적합한 표준 벤치마크이기도 합니다. 본 글에서는 기본적인 커널 구현에서 시작하여, 하드웨어 성능을 한계치까지 끌어올리기 위해 다음과 같은 단계별 최적화 기법을 적용해 봅니다.
 
-NVIDIA GPU의 메모리 계층을 크게 나누면 다음과 같다.
+1. **Memory Coalescing**: 글로벌 메모리 접근 패턴을 정렬하여 대역폭 효율을 높이는 방법
+2. **Shared Memory Tiling**: 데이터를 공유 메모리에 적재하여 글로벌 메모리 접근 횟수를 줄이는 전략
+3. **Register Tiling**: 각 스레드가 처리하는 데이터 단위를 키워 공유 메모리 접근조차 최소화하는 기법
+4. **Vectorized Access**: 128비트 로드/스토어 명령어를 사용하여 메모리 연산 횟수를 줄이는 최적화
+5. **Warp Tiling**: 연산 단위를 워프(Warp) 수준으로 분할하여 계층적으로 성능을 높이는 구조
 
-- **Global Memory(GMEM)**: 우리가 흔히 말하는 VRAM으로, 모든 스레드가 접근할 수 있는 가장 큰 메모리 공간이다. 다만 레이턴시와 대역폭 측면에서는 가장 느린 편이다.
-- **Shared Memory(SMEM)**: 같은 Block에 속한 스레드들이 함께 사용하는 on-chip 메모리다. 프로그래머가 직접 인덱스를 계산해 읽고 쓰는 일종의 “소프트웨어 관리 캐시” 역할을 한다.
-- **Register**: 각 Thread가 독점적으로 사용하는 가장 빠른 저장 공간으로, 스칼라/로컬 변수들이 주로 여기에 매핑된다. CPU의 캐시처럼 자동으로 관리되는 것이 아니라, 컴파일러가 변수들을 레지스터에 배치한다는 점에서 **프로그램이 논리적으로 직접 사용하는 공간**에 가깝다.
+이 과정을 통해 단순한 코드 구현을 넘어, GPU의 메모리 계층 구조와 연산 유닛을 어떻게 하면 가장 효율적으로 사용할 수 있는지 소개합니다.
 
-이 외에도 Shared Memory와 공간을 공유하는 **L1 캐시**, 모든 SM이 공유하는 **L2 캐시**가 있다.  
-다만 이 글에서는 L1 캐시는 직접 다루지 않고, 동일 계층(on-chip)에서 프로그래머가 제어할 수 있는 Shared Memory(SMEM)를 중심으로 설명한다. L2 캐시는 이후에 따로 다룰 예정이다.
 
-메모리의 접근속도와 용량은 반비례  
+## NVIDIA GPU 하드웨어 구성
+### 연산 구조
+![gpu comp architecture](./images/gpu_comp_arch.png)
+우리가 흔히 사용하는 CPU는 복잡한 제어 논리와 대용량 캐시를 통해 단일 스레드의 성능을 극대화하는데 초점이 맞춰져 있습니다. 반면 GPU는 수많은 스레드를 동시에 실행시키는 병렬 처리에 최적화된 구조를 갖추고 있습니다.
+
+NVIDIA GPU의 기본 연산 단위는 **Streaming Multiprocessor (SM)** 입니다.
+
+각 SM은 수많은 **CUDA Core (SP)** 로 구성되어 있으며, 각 SP는 실제로 산술 연산을 수행하는 단위입니다.
+
+### 메모리 구조
+![gpu mem architecture](./images/gpu_mem_arch.png)
+NVIDIA GPU의 메모리 계층은 다음과 같이 3단계로 나뉩니다.
+
+- **Global Memory(GMEM)**: 우리가 흔히 말하는 VRAM으로, GPU의 모든 스레드가 접근할 수 있는 가장 큰 메모리 공간이나 접근 속도는 가장 느립니다.
+- **Shared Memory(SMEM)**: 같은 Block에 속한 스레드들이 함께 사용하는 on-chip 메모리입니다. 프로그래머가 직접 인덱스를 계산해 읽고 쓰는 일종의 **Software-managed cache** 역할을 합니다. GMEM에 비해 메모리 공간은 작지만 접근 속도는 훨씬 빠르다는 장점이 있습니다.
+- **Register**: 각 Thread가 독점적으로 사용하는 가장 빠른 저장 공간으로, 연산 집약적으로 사용되는 변수들이 주로 여기에 매핑됩니다. CPU의 캐시처럼 자동으로 관리되는 것이 아니라, 컴파일러가 변수들을 레지스터에 배치한다는 점에서 **Compiler-managed cache** 역할을 합니다.
+
+이 외에도 Shared Memory와 공간을 공유하는 **L1 캐시**, 모든 SM이 공유하는 **L2 캐시**가 있습니다.
+
+정리하자면 메모리의 접근속도와 용량은 반비례 관계를 가집니다.
+
 속도: Register > SMEM > GMEM  
 용량: GMEM > SMEM > Register  
 
-![gpu architecture](./images/gpu_arch.png)
+## CUDA Programming Model
+CUDA 프로그래밍 모델은 계층적 병렬 실행 구조를 기반으로 합니다.  
+연산은 크게 **Grid → Block → Thread**의 3계층으로 나누어집니다.  
+(하드웨어적으로는 Block과 Thread 계층 사이에 Warp 계층이 존재하지만, CUDA 코드에는 직접 등장하지 않습니다.)
 
-## Three-level of Computation Hierarchy
-각 CUDA 커널의 실행은 하나의 Grid로 실행된다. 각 Grid는 다수의 Block들로 이루어져 있고 각 Block은 최대 1024개의 Thread로 구성된다. 
-
+### Three-level of Computation Hierarchy
 ![grid of thread blocks](./images/grid_of_thread_blocks.png)
 
-Block들은 여러 SM에 스케줄될 수 있으며, SM당 여러 Block이 동시에 배치될 수 있다. 같은 Block에 속한 Thread들끼리는 SMEM을 통해 데이터 공유가 가능한 반면 다른 Block에 속한 Thread들끼리는 GMEM을 통해서만 데이터 공유가 가능하다.
+하나의 CUDA 커널은 하나의 Grid이며, Grid는 한 개 이상의 Block으로 구성됩니다. 각 Block은 다시 여러 Thread로 구성됩니다. 
+
+이때 각 Block은 독립적 연산 단위로 각기 다른 SM에서 병렬로 실행될 수 있습니다. 이는 같은 Grid에 속한 Block들이 서로 다른 SM에서 동시에 실행될 수 있음을 의미하며, 다른 Block에 속한 Thread들은 SMEM을 공유하지 못한다는 뜻이기도 합니다. 만약 Block 수준의 협력이 필요하다면 느리지만 GMEM을 통해 데이터를 주고 받아야 합니다.
 
 ## CUDA Kernel Launch Example
-아래는 간단한 Kernel 호출 예제이다. 커널 호출 안에서 각 Thread는 자신이 속한 Block 좌표와 Thread 좌표를 출력한다.
+아래는 간단한 Kernel 호출 예제입니다. 커널 호출 안에서 각 Thread는 자신이 속한 Block 좌표와 Thread 좌표를 출력합니다.
 ```cpp
 #include <cuda_runtime.h>
 #include <stdio.h>
@@ -52,105 +70,113 @@ int main() {
 }
 ```
 
-## SGEMM 소개
-해당 튜토리얼에서는 SGEMM (Single Precision General Matrix Multiplication)을 다룬다. SGEMM는 $C=\alpha \cdot A \cdot B + \beta \cdot C$ 를 기본형태로 갖는다. 
+## SGEMM 연산 소개
+해당 튜토리얼에서는 SGEMM (Single Precision General Matrix Multiplication)을 다룹니다. SGEMM는 $C=\alpha \cdot A \cdot B + \beta \cdot C$ 를 기본형태로 갖습니다. 
 
-여기서 A, B는 두 입력 행렬이고 C는 출력 행렬이다. $\alpha$ 와 $\beta$ 는 단순히 행렬 전체에 곱해지는 scalar값이다. 
+여기서 A, B는 두 입력 행렬이고 C는 출력 행렬입니다. $\alpha$ 와 $\beta$ 는 단순히 행렬 전체에 곱해지는 scalar값입니다. 
 
-## SGEMM의 연산적 특성 분석
+### 연산 분석
 
-이해를 돕기위해 두 A, B 행렬 모두 N by N 행렬이라고 하자, 그럼 SGEMM가 연산되며 드는 연산량과 읽고 써야되는 아래와 같다.
+이해를 돕기위해 두 A, B 행렬 모두 N by N 행렬이라고 가정합니다. 그럼 SGEMM가 연산되며 드는 연산량과 읽고 써야되는 아래와 같습니다.
 
 Total FLOPS: $2\cdot N^{3} + 3\cdot N^{2} \approx 2\cdot N^{3}$  
 Total data to read: $3 \cdot N^{2} \cdot \text{4 Byte} = 12 \cdot N^{2} \text{ Byte}$  
 Total data to store: $4 \cdot N^{2} \text{ Byte}$  
 
-먼저 연산을 위해 드는 총 FLOPS는 행렬곱셈 결과 행렬 C의 각 원소마다 dot product를 수행에 대략적으로 $2 \cdot N^{3}$ 만큼의 연산이 든다(N번의 곱셈 + N-1번의 덧셈). 다음으로 $\alpha \cdot C_{new} + \beta \cdot C_{old}$ 연산을 위해 총 $3 \cdot N^{2}$ 만큼의 연산량이 필요하다.
+먼저 연산을 위해 드는 총 FLOPS는 행렬곱셈 결과 행렬 C의 각 원소마다 dot product를 수행에 대략적으로 $2 \cdot N^{3}$ 만큼의 연산이 듭니다(N번의 곱셈 + N-1번의 덧셈). 다음으로 $\alpha \cdot C_{new} + \beta \cdot C_{old}$ 연산을 위해 총 $3 \cdot N^{2}$ 만큼의 연산량이 필요합니다.
 
-연산을 위해 읽어들이는 데이터의 크기는 행렬 A, B, C를 각각 적도도어도 한번씩 읽어들여야하기 때문에 $3 \cdot N^{2} \text{ Byte}$ 만큼을 GMEM로부터 읽어와야 한다. 결과 행렬 C를 위해 GMEM에 써야하는 데이터의 크기는 $4 \cdot N^{2} \text{ Byte}$ 이다. 
+연산을 위해 읽어들이는 데이터의 크기는 행렬 A, B, C를 각각 적도도어도 한번씩 읽어들여야하기 때문에 $3 \cdot N^{2} \text{ Byte}$ 만큼을 GMEM로부터 읽어와야 합니다. 결과 행렬 C를 위해 GMEM에 써야하는 데이터의 크기는 $4 \cdot N^{2} \text{ Byte}$ 입니. 
 
-만약 N을 4096이라고 가정했을때는 아래와 같다.
+만약 N을 4096이라고 가정했을때는 아래와 같습니다.
 
 Total FLOPS: 137 GFLOPS  
 Total data to read: 201 MB  
 Total data to write: 67 MB  
 
-필자가 현재 사용하는 GPU는 RTX 4060 Ti (8GB)이며 이론적 FP32 연산량 상한은 22 TFLOPS이고 Memory Bandwidth는 288 GB/s이다. 
+필자가 현재 사용하는 GPU는 RTX 4060 Ti (8GB)이며 이론적 FP32 연산량 상한은 22 TFLOPS이고 Memory Bandwidth는 288 GB/s입니다. 
 
-이론적으로는 137 GFLOPS는 RTX 4060 Ti에서 6.2 ms만에 처리되야한다. 메모리 읽기/쓰기에 드는 시간은 0.93 ms 정도 소요되어야 한다. 
+이론적으로는 137 GFLOPS는 RTX 4060 Ti에서 6.2 ms만에 처리되어야 합니다. 메모리 읽기/쓰기에 드는 시간은 0.93 ms 정도 소요되어야 합니다. 
 
 **앞으로 등장할 각 최적화 버전에서는 입력행렬의 크기는 모두 4096 by 4096으로 가정한다.**
 
 ## cuBLAS Version (matmul_cublas)
-cuBLAS는 NVIDIA GPU의 연산 자원을 활용하여 BLAS(Basic Linear Algebra Subprograms) 함수를 가속화하는 소프트웨어 라이브러리이다.
+cuBLAS는 NVIDIA GPU의 연산 자원을 활용하여 BLAS(Basic Linear Algebra Subprograms) 함수를 가속화하는 소프트웨어 라이브러리입니다.
 
-cuBlas를 사용해 행렬곱셈시 약 13 ms의 시간이 소요되었다. 이는 이론적 상한인 6.2 ms 대비 약 50%정도의 성능까지 도달함을 보여준다. 
+cuBlas를 사용해 행렬곱셈시 약 13 ms의 시간이 소요되었습니다. 이는 이론적 상한인 6.2 ms 대비 약 50%정도의 성능까지 도달함을 보여줍니다. 
 
 ## Naive Version (matmul_naive)
-Naive버전 행렬곱("matmul_naive.cu")는 CuBLAS의 성능(100% 기준)대비 약 1.3% 정도의 성능밖에 내지 못한다. 실제로 연산에 소요된 시간은 830 ms 정도로 실제 하드웨어가 제공하는 연산능력을 거의 활용하지 못하는 것을 확인 할 수 있다.
+Naive버전 행렬곱("matmul_naive.cu")는 CuBLAS의 성능(100% 기준)대비 약 1.3% 정도의 성능밖에 내지 못합니다. 실제로 연산에 소요된 시간은 830 ms 정도로 실제 하드웨어가 제공하는 연산능력을 거의 활용하지 못하는 것을 확인 할 수 있습니다.
 
 ## Global Memory Coalescing (matmul_coalescing)
-Global memory coalescing 버전은 같은 Warp에 속한 Thread들이 동시에 연속된 메모리를 접근할때 여러개의 개별 메모리 접근 연산을 하나로 합쳐 한번에 수행하는 기능을 활용한다. 이때 Thread들이 접근하는 메모리는 연속적(Consecutive)이어야하고 정렬(Aligned)되어있어야 한다. 대부분의 GPU는 32B, 64B, 128B Burst 메모리 접근을 지원한다. 
+Global memory coalescing 버전은 같은 Warp에 속한 Thread들이 연속된 메모리를 접근할때 여러개의 개별 메모리 접근 연산을 하나로 합쳐 한번에 수행하는 기능을 활용합니다. 이때 Thread들이 접근하는 메모리는 연속적(Consecutive)이어야하고 정렬(Aligned)되어있어야 한다. 대부분의 GPU는 32B, 64B, 128B Burst 메모리 접근을 지원합니다. 
 
-만약 32개의 Thread가 4B씩 메모리를 접근하는 상황에서 메모리가 연속적이고 정렬되어있으면 32번의 메모리 연산을 1번에 처리할 수 있다.
+만약 32개의 Thread가 4B씩 메모리를 접근하는 상황에서 메모리가 연속적이고 정렬되어있으면 32번의 메모리 연산을 1번에 처리할 수 있습니다.
 
-아래는 Naive버전의 메모리 접근 방식을 보여준다 (실제로 하나의 Warp에는 32개의 Thread가 있지만 간단하게 표현하기 위해 한 Warp당 8개의 Thread로 설정). 같은 Warp에 속한 Thread들이 메모리를 비연속적이게 접근하고 있음을 확인할 수 있다.
-![naive_kernel_mem_access](images/naive_kernel_mem_access.png)
-위 다이어그램에서 A 행렬에 대해 한 Warp에 속한 1번 Thread가 Red 영역을 접근, 2번 Thread가 Green 영역을 시간이 지남에 따라 오른쪽으로 이동한다고 했을때 Warp의 Thread들은 항상 행 방향으로 가로질러 메모리를 접근(메모리는 열방향으로 연속적)하기에 Global memory coalescing 기능을 전혀 사용하지 못한다.
+아래는 Naive버전의 메모리 접근 방식을 보여줍니다 (실제로 하나의 Warp에는 32개의 Thread가 있지만 간단하게 표현하기 위해 한 Warp당 8개의 Thread로 가정). 같은 Warp에 속한 Thread들이 메모리를 산발적으로 접근하고 있음을 확인할 수 있습니다.
 ![naive_kernel_mem_coalescing](images/Naive_kernel_mem_coalescing.png)
+![naive_kernel_mem_access](images/naive_kernel_mem_access.png)
+위 다이어그램에서 A 행렬에 대해 한 Warp에 속한 1번 Thread가 빨강색 영역을 접근, 2번 Thread가 초록색 영역을 시간이 지남에 따라 오른쪽으로 이동한다고 했을때 Warp의 Thread들은 항상 행(세로) 방향으로 가로질러 메모리를 접근(메모리는 가로방향으로 연속적)하기에 Global memory coalescing 기능을 전혀 사용하지 못합니다.
 
-아래 다이어그램은 GMEM coalescing을 했을때 메모리 접근 패턴이다. 
+아래 다이어그램은 GMEM coalescing 기법을 적용했을때 메모리 접근 패턴입니다. 
+이는 단순하게 GMEM coalescing을 활용하는 방법은 한 Warp에 속한 Thread들이  열 방향으로 순차 배치되도록 수정하면 됩니다. 이제 각 Thread들이 메모리를 접근할때 행(세로) 방향으로 접근하는 것이 아니라 열(가로) 방향으로 접근하게 되어 Global memory coalescing 기능을 활용할 수 있게 됩니다.
 ![GMEM_coalescing](images/GMEM_coalescing.png)
-
-GMEM coalescing을 활용하는 방법은 한 Warp에 속한 thread의 번호가 열 방향으로 증가하도록 설정하면된다.
 
 ```cpp
 int row = blockIdx.x * kBlockDim + (threadIdx.x / kBlockDim);
 int col = blockIdx.y * kBlockDim + (threadIdx.x % kBlockDim); // 열방향으로 먼저 증가
 ```
 
-Memory coalescing 적용후 성능은 cuBLAS 대비 13.5%정도까지 성능이 향상됨을 확인할 수 있었음.
+Memory coalescing 적용후 성능은 cuBLAS 대비 13.5%정도까지 성능이 향상됨을 확인할 수 있었습니다.
 
 ## Shared Memory Cache-Blocking (matmul_smem_block)
-GPU의 각 Streaming Multiprocessor (SM)은 L1 캐시와 공간을 공유하는 Shared memory (SMEM)가 존재한다. RTX 4060 Ti (compute capability 8.9)는 각 Block당 사용할 수 있는 최대 shared memory 크기는 약 100 KB이다. SMEM의 대역폭은 일반적으로 GMEM보다 10~20배 빠른 것으로 알려져있다 (Volta architecture 기준). 
+GPU의 각 Streaming Multiprocessor (SM)은 L1 캐시와 공간을 공유하는 Shared memory (SMEM)가 존재합니다. RTX 4060 Ti (compute capability 8.9)는 각 Block당 사용할 수 있는 최대 shared memory 크기는 약 100 KB 입니다. SMEM의 대역폭은 일반적으로 GMEM보다 10~20배 빠른 것으로 알려져 있습니다 (Volta architecture 기준). 
 
-행렬 곱셈시 입력 행렬의 각 원소는 결과 계산을 위해 총 N번씩 접근된다. 매번 GMEM을 다시 접근하는 비효율적인 방식대신 데이터를 GMEM에서 SMEM으로 한번 옮겨두고 여러번 재사용하는 방식이 훨씬 더 효율적이다. smem_block 예제에서는 GMEM에서 한번 SMEM으로 데이터를 가져오고 재사용하는 방식으로 GMEM 접근을 최소화하여 성능을 향상시킨다.
+행렬 곱셈시 입력 행렬의 각 원소는 결과 계산을 위해 총 N번씩 접근됩니다. 매번 GMEM을 다시 접근하는 비효율적인 방식대신 데이터를 GMEM에서 SMEM으로 한번 옮겨두고 여러번 재사용하는 방식이 훨씬 더 효율적입니다. smem_block 예제에서는 GMEM에서 한번 SMEM으로 데이터를 가져오고 최대한 재사용을 지향한 GMEM 접근 최소화를 통해 성능을 향상시킵니다.
 
 ![shared_memory_cache_blocking](images/cache-blocking.png)
 
-SMEM cache-blocking방식을 활용해 실제 연산 수행시간을 측정해보았을때 cuBLAS 대비 약 11%정도의 성능이 나왔다. SMEM 방식은 GMEM coalescing 방식보다 높은 성능이 나온다고 알려져있는데 RTX 4060 Ti에서는 N=4069일때 둘이 비슷한 성능이 나왔다(N이 매우 클때는 SMEM 방식이 더 빠른 것 확인)
+SMEM cache-blocking방식을 활용해 실제 연산 수행시간을 측정해보았을때 cuBLAS 대비 약 11%정도의 성능이 나오는 것을 확인할 수 있습니다. SMEM 방식은 GMEM coalescing 방식보다 높은 성능이 나온다고 알려져있는데 RTX 4060 Ti에서는 N=4069일때 둘이 비슷한 성능이 나왔다(N이 매우 클때는 SMEM 방식이 더 빠른 것이 확인됩니다).
 
-GMEM대신 SMEM을 사용한다고하더라도 아직 cuBLAS의 성능과는 많이 차이가 난다. 이러한 차이는 Warp가 실행될동안 어떤 상태에 대부분 머물렀는지 확인함으로서 원인 분석이 가능하다. 
+GMEM대신 SMEM을 사용한다고하더라도 아직 cuBLAS의 성능과는 많이 차이가 납니다. 
+
+### Occupancy and Warp Stall Analysis
+성능 차이를 분석하기 위해 먼저 Occupancy를 확인해볼 수 있습니다. Occupancy는 하나의 SM에서 동시에 실행될 수 있는 Active Warp의 비율을 의미합니다. Occupancy가 높을수록 GPU의 연산 유닛이 더 많이 활용될 가능성이 높아지므로 일반적으로 성능 향상에 긍정적인 영향을 미칩니다.
+
+일반적으로 Occupancy를 계산하기 위해 SM당 제공하는 SMEM 크기, 최대 Thread 수, Register 수 등을 고려해야 합니다. CUDA 프로그래머는 커널을 설계할때 이러한 자원 제한을 염두에 두고 최적의 Block 크기와 자원 사용량을 조절해야 합니다.
+
+여기서는 실제 Occupancy를 구하는 과정은 생략하였습니다. 필요하다면 [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM)의 **Kernel 3: Shared Memory Cache-Blocking** 섹션에서 자세한 내용을 확인할 수 있습니다. 해당 링크에서 SGEMM의 Occupancy는 약 66% 정도로 계산되었습니다. 이는 그리 나쁜지 않은 수치이지만 cuBLAS와 비교했을때 여전히 성능 차이가 나는 이유를 설명하지는 못합니다.
+
+이러한 차이는 Warp가 실행될동안 어떤 상태에 대부분 머물렀는지 확인함으로서 원인 분석이 가능합니다. 
 
 ![checking_warp_state](images/kernel_3_profiler_warp_stalls.png)
-위 그래프에서 Warp는 대부분 **Stall MIO Throttle**상태에 머물렀음을 확인할 수 있다. 이것의 설명은 아래와 같다.
+위 그래프에서 Warp는 대부분 **Stall MIO Throttle**상태에 머물렀음을 확인할 수 있습니다. 이것의 설명은 아래와 같습니다. 
 
 Warp was stalled waiting for the MIO (memory input/output) instruction queue to be not full. This stall reason is high in cases of extreme utilization of the MIO pipelines, which include special math instructions, dynamic branches, as well as **shared memory instructions**
 
-즉, Warp가 실제 연산을 수행하는데 보내는 시간보다 SMEM 관련 명령어를 처리하는데 더 시간을 소요한다는 것이다. 우리는 SMEM 또한 최소한 접근하며 연산에 필요한 데이터를 최대한 재사용하는 방식을 찾아야한다.
+즉, Warp가 실제 연산을 수행하는데 보내는 시간보다 SMEM 관련 명령어를 처리하는데 더 시간을 소요했다는 것입니다. 우리는 SMEM 또한 최소한 접근하며 연산에 필요한 데이터를 최대한 재사용하는 방식을 찾아야합니다. 아마도 SMEM보다 더 빠른 저장장치인 Register를 효과적으로 활용하는 방법이 필요할 것입니다.
 
-## 1D Blocktiling for Calculating Multiple Results per Thread (matmul_1d_block_tiling)
-NVIDIA GPU 하드웨어에는 SMEM보다 더 빠른 저장장치인 Register가 존재한다. 각 Thread는 작업에 필요한만큼 Register를 할당받아 사용할 수 있다. 이때 Thread들끼리는 Register를 공유하지 않는다는 점에 유의한다. 
+## 1D Register Blocktiling for Calculating Multiple Results per Thread (matmul_1d_block_tiling)
+NVIDIA GPU 하드웨어에는 SMEM보다 더 빠른 저장장치인 Register가 존재합니다. 각 Thread는 작업에 필요한만큼 Register를 할당받아 사용할 수 있습니다. 이때 Thread들끼리는 Register를 공유하지 않는다는 점에 유의합니다. 
 
-1D Blocktiling 방식은 각 Thread가 1차원 형태의 다수 결과를 계산한다. 이 방식은 계산에 필요한 데이터를 SMEM으로부터 Register로 가져오고 여러번 재사용하는 방식을 통해 Arithmetic Intensity(데이터를 메모리로부터 한번 가져와서 얼마나 재사용하는지에 대한 정도)를 증가시킨다. 
+1D Register Blocktiling 방식은 각 Thread가 1차원 형태의 다수 결과를 계산합니다. 이 방식은 계산에 필요한 데이터를 SMEM으로부터 Register로 가져오고 여러번 재사용하는 방식을 통해 Arithmetic Intensity(데이터를 메모리로부터 한번 가져와서 얼마나 재사용하는지에 대한 정도)를 증가시킵니다. 
 
 $ \text{Aritemetic Intensity} = (\text{연산 횟수}) / (\text{메모리 접근 바이트 수}) $
 
 ![1d_block_tiling](images/kernel_4_1D_blocktiling.png)
 
-1D block tiling 방식은 cuBLAS 대비 약 20%의 성능을 보인다. 이전보다 약 2배정도의 성능 향상이 있음을 보인다.
+1D block tiling 방식은 cuBLAS 대비 약 20%의 성능을 보입니다. 이전보다 약 2배정도의 성능 향상이 있음을 보입니다.
 
-아래 그래프를 확인해보면 Stall MIO Throttle이 확연히 준 것을 확인할 수 있다. 
+아래 그래프를 확인해보면 Stall MIO Throttle이 확연히 준 것을 확인할 수 있습니다. 
 ![checking_warp_state_after_1d_tiling](images/Kernel_4_profiler_warp_stalls.png)
 
 ## 2D Blocktiling for Calculating Multiple Results per Thread (matmul_2d_block_tiling)
 
-2D block tiling 방식은 1D 버전의 2D 확장이다. 성능은 cuBLAS 대비 50% 성능까지 보인다.
+2D block tiling 방식은 1D 버전의 2D 확장입니다. 성능은 cuBLAS 대비 50% 성능까지 보입니다.
 
 ![2d_block_tiling](images/kernel_5_2D_blocktiling.png)
 
 ## Vectorize SMEM and GMEM Accesses
-이전의 GMEM coalescing이 warp 단위에서 여러 thread의 메모리 접근을 하나의 트랜잭션으로 통합하는 최적화라면, vectorized memory access는 thread 단위에서 연속된 여러 요소(float4, int4 등)를 한 번의 명령으로 Load/Store하는 최적화이다.
+이전의 GMEM coalescing이 warp 단위에서 여러 thread의 메모리 접근을 하나의 트랜잭션으로 통합하는 최적화라면, vectorized memory access는 thread 단위에서 연속된 여러 요소(float4, int4 등)를 한 번의 명령으로 Load/Store하는 최적화입니다.
 
 ```cpp
     float4 tmp = reinterpret_cast<const float4 *>(&A[ira * K + ica * 4])[0];
@@ -165,26 +191,26 @@ $ \text{Aritemetic Intensity} = (\text{연산 횟수}) / (\text{메모리 접근
         reinterpret_cast<const float4 *>(&B[irb * N + icb * 4])[0];
 ```
 
-Vectorized 기법 적용 후 성능은 cuBLAS 대비 약 60%까지 올라옴을 확인했음.
+Vectorized 기법 적용 후 성능은 cuBLAS 대비 약 60%까지 올라옴을 확인했습니다.
 
 ## Warptiling
-Warp tiling은 Block tiling과 Thread tiling 사이에 위치한 병렬 계층임. Block tiling과 Thread tiling만으로는 효율적인 GEMM을 만들기 어려움. CUDA 하드웨어는 실제로 Warp 단위(32 Threads)로 실행을 스케줄링하며, warp 단위 최적화를 하지 않으면 다음의 문제가 생김.
+Warp tiling은 Block tiling과 Thread tiling 사이에 위치한 병렬 계층입니다. Block tiling과 Thread tiling만으로는 효율적인 GEMM을 만들기 어렵습니다. CUDA 하드웨어는 실제로 Warp 단위(32 Threads)로 실행을 스케줄링하며, warp 단위 최적화를 하지 않으면 다음의 문제가 생깁니다.
 
 - Shared memory bank conflict 해결이 어려움
-- Thread tile이 충분히 재사용되지 않아 Register 재사용성이 낮음.
+- Thread tile이 충분히 재사용되지 않아 Register 재사용성이 낮음
 - Warp scheduler를 충분히 활용하지 못해 ILP, latency hiding 부족
 - Tensor Core MMA와 구조적 일치가 안됨
 
 따라서 Block tile 내부를 다시 여러 Warp tile로 나누고, 
-각 Warp가 자기 tile을 독립적으로 계산하도록 하는 방식이 Warptiling이다.  
+각 Warp가 자기 tile을 독립적으로 계산하도록 하는 방식이 Warptiling 입니다.  
 이로 인해 Warp 단위 병렬성이 드러나고, shared memory 접근, register reuse, 
-스케줄링 효율이 크게 향상된다.
+스케줄링 효율이 크게 향상됩니다.
 
-아래는 Warptiling 기법을 사용했을때 어떤식으로 작업이 세분화되어 처리되는지 보여준다.
+아래는 Warptiling 기법을 사용했을때 어떤식으로 작업이 세분화되어 처리되는지 보여줍니다.
 
 ![warp_tiling](images/kernel_10_warp_tiling.png)
 
-Warptiling 코드는 위 과정을 주석으로 설명했음.
+Warptiling 코드는 위 과정을 주석으로 설명합니다.
 
 ```cpp
 namespace {
@@ -347,7 +373,12 @@ __global__ void SgemmWarpTiling(int M, int K, int N, float alpha,
 }  // namespace
 ```
 
-Warptiling 기법 적용후 성능은 cuBLAS 대비 ~85%까지 올라옴을 확인함.
+Warptiling 기법 적용후 성능은 cuBLAS 대비 ~85%까지 올라옴을 확인하였습니다.
+
+## How to run example
+```sh
+$ cd docker && docker-compose up
+```
 
 ## 참고자료 
 [1] https://siboehm.com/articles/22/CUDA-MMM  
