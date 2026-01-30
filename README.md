@@ -373,7 +373,7 @@ __global__ void SgemmWarpTiling(int M, int K, int N, float alpha,
 }  // namespace
 ```
 
-Warptiling 기법 적용후 성능은 cuBLAS 대비 ~85%까지 올라옴을 확인하였습니다.
+Warptiling 기법 적용후 성능은 cuBLAS 대비 ~90%까지 올라옴을 확인하였습니다.
 
 ## How to run example
 ```sh
