@@ -130,25 +130,53 @@ int col = blockIdx.y * kBlockDim + (threadIdx.x % kBlockDim); // 열방향으로
 
 Memory coalescing 적용후 성능은 cuBLAS 대비 13.5%정도까지 성능이 향상됨을 확인할 수 있었습니다.
 
-## Shared Memory Cache-Blocking (matmul_smem_block)
+## Shared Memory Tiling (matmul_smem_block)
 GPU의 각 Streaming Multiprocessor (SM)은 L1 캐시와 공간을 공유하는 Shared memory (SMEM)가 존재합니다. RTX 4060 Ti (compute capability 8.9)는 각 Block당 사용할 수 있는 최대 shared memory 크기는 약 100 KB 입니다. SMEM의 대역폭은 일반적으로 GMEM보다 10~20배 빠른 것으로 알려져 있습니다 (Volta architecture 기준). 
 
-행렬 곱셈시 입력 행렬의 각 원소는 결과 계산을 위해 총 N번씩 접근됩니다. 매번 GMEM을 다시 접근하는 비효율적인 방식대신 데이터를 GMEM에서 SMEM으로 한번 옮겨두고 여러번 재사용하는 방식이 훨씬 더 효율적입니다. smem_block 예제에서는 GMEM에서 한번 SMEM으로 데이터를 가져오고 최대한 재사용을 지향한 GMEM 접근 최소화를 통해 성능을 향상시킵니다.
+행렬 곱셈시 입력 행렬의 각 원소는 결과 계산을 위해 총 N번씩 접근됩니다 (입력 행렬 N x N 가정). 매번 GMEM을 다시 접근하는 비효율적인 방식 대신 데이터를 GMEM에서 SMEM으로 한번 옮겨두고 여러번 재사용(Reuse)하는 방식이 훨씬 더 효율적입니다. smem_block 예제에서는 GMEM에서 한번 SMEM으로 데이터를 가져오고 최대한 재사용을 지향한 GMEM 접근 최소화를 통해 성능을 향상시킵니다.
+
+GMEM에 비해 훨씬 작은 크기를 갖는 SMEM에는 입력 행렬 전체를 한번에 올릴수 없습니다. 따라서 Tiling 기법을 사용해서 입력을 Subtile 단위로 누적 계산을 통해 전체 결과를 구합니다.
 
 ![shared_memory_cache_blocking](images/cache-blocking.png)
 
-SMEM cache-blocking방식을 활용해 실제 연산 수행시간을 측정해보았을때 cuBLAS 대비 약 11%정도의 성능이 나오는 것을 확인할 수 있습니다. SMEM 방식은 GMEM coalescing 방식보다 높은 성능이 나온다고 알려져있는데 RTX 4060 Ti에서는 N=4069일때 둘이 비슷한 성능이 나왔다(N이 매우 클때는 SMEM 방식이 더 빠른 것이 확인됩니다).
+SMEM cache-blocking방식을 활용해 실제 연산 수행시간을 측정해보았을때 cuBLAS 대비 약 11%정도의 성능이 나오는 것을 확인할 수 있습니다. SMEM 방식은 GMEM coalescing 방식보다 높은 성능이 나온다고 알려져있는데 RTX 4060 Ti에서는 N=4096일때 둘이 비슷한 성능이 나왔습니다(N이 매우 클때는 SMEM 방식이 더 빠른 것이 확인됩니다).
 
 GMEM대신 SMEM을 사용한다고하더라도 아직 cuBLAS의 성능과는 많이 차이가 납니다. 
 
 ### Occupancy and Warp Stall Analysis
-성능 차이를 분석하기 위해 먼저 Occupancy를 확인해볼 수 있습니다. Occupancy는 하나의 SM에서 동시에 실행될 수 있는 Active Warp의 비율을 의미합니다. Occupancy가 높을수록 GPU의 연산 유닛이 더 많이 활용될 가능성이 높아지므로 일반적으로 성능 향상에 긍정적인 영향을 미칩니다.
+커널 성능을 분석하기 위해 Occupancy를 확인해볼 수 있습니다. Occupancy는 SM당 (Active Warp 개수 / Maximum Warp 개수) 입니다. Occupancy가 높을수록 GPU의 연산 유닛이 쉴틈없이 활용될 가능성이 높아지므로 일반적으로 성능 향상에 긍정적인 영향을 미칩니다. 다음 다이어그램과 같이 한 Warp가 실행될때 다음 실행될 Warp를 동시에 준비시켜 연산 유닛이 쉴틈 없도록 합니다. (Batch가 Warp를 표현)
 
-일반적으로 Occupancy를 계산하기 위해 SM당 제공하는 SMEM 크기, 최대 Thread 수, Register 수 등을 고려해야 합니다. CUDA 프로그래머는 커널을 설계할때 이러한 자원 제한을 염두에 두고 최적의 Block 크기와 자원 사용량을 조절해야 합니다.
+![warp latency hiding](images/warp_latency_hiding.png)
 
-여기서는 실제 Occupancy를 구하는 과정은 생략하였습니다. 필요하다면 [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM)의 **Kernel 3: Shared Memory Cache-Blocking** 섹션에서 자세한 내용을 확인할 수 있습니다. 해당 링크에서 SGEMM의 Occupancy는 약 66% 정도로 계산되었습니다. 이는 그리 나쁜지 않은 수치이지만 cuBLAS와 비교했을때 여전히 성능 차이가 나는 이유를 설명하지는 못합니다.
+일반적으로 Occupancy를 계산하기 위해 현재 사용하는 GPU에서 지원하는 하드웨어 리소스를 알아야합니다. 다음은 RTX 4060 Ti의 스펙입니다. (cudaGetDeviceProperties API)
 
-이러한 차이는 Warp가 실행될동안 어떤 상태에 대부분 머물렀는지 확인함으로서 원인 분석이 가능합니다. 
+RTX 4060 Ti Spec
+- Compute Capability: 8.9
+- max threads per block: 1024
+- max threads per multiprocessor: 1536
+- warp allocation granularity: 4
+- max regs per block: 65536
+- max regs per multiprocessor: 65536
+- reg allocation unit size: 256 
+- reg allocation granularity: warp
+- total global mem: 7799 MB
+- max shared mem per block: 48 KB
+- CUDA runtime shared mem overhead per block: 1024 B
+- shared mem per multiprocessor: 102400 B
+- multiprocessor count: 34
+- max warps per multiprocessor: 48
+
+다시 Shared memory tiling 예제로 돌아가서 Occupancy를 구해봅시다.
+
+먼저 SMEM tiling 예제에서 사용한 SMEM의 크기는 Block당 CUDA runtime usage 1KB와 서브타일 A, B 용도로 할당된 8KB로 총 9KB입니다. 이는 한 SM에서 제공하는 총 SMEM의 크기인 100KB를 한참 못 사용하고 있습니다. 이론적으는 SM당 약 11개의 Block이 동시에 존재할 수 있습니다.
+
+다음으로 Block당 할당한 Thread의 개수는 1024(32*32)개 였습니다. SM당 최대 Thread 개수는 1536개로 하나의 SM당 1개의 Block만 존재가능합니다.
+
+다음으로 Thread당 필요한 Register의 개수는 약 37개이고 하나의 Warp에는 32개의 Thread가 있으니 Warp 당 필요한 Register의 개수는 1184개입니다. 하지만 Register는 256개 단위(reg allocation unit size)로 할당되어 Warp당 필요한 Register의 개수는 1280개입니다. 또한 우리는 Block당 32개의 Warp를 갖고 있으니 Block당 총 40960개의 Register를 필요로합니다. 이는 SM당 1개의 Block만 동시에 존재 가능함을 보입니다 (40960 / 65536). 
+
+따라서 SMEM tiling 예제에서 병목은 Thread 개수와 Register 개수입니다. SM당 동시에 존재할 수 있는 Block 개수는 1개이며 각 Block은 32개의 Warp를 포함하고 있으니 Occupancy = 32 active warps / 48 max warps = 0.66 입니다.
+
+0.66의 Occupancy는 나쁘지 않은 수치이므로 문제의 원인은 Occupancy가 아닙니다. 우리의 Kernel 느리게 동작하는 원인을 다른곳에서 찾아보아야합니다. 이러한 차이는 Warp가 실행될동안 어떤 상태에 대부분 머물렀는지 확인함으로서 원인 분석이 가능합니다. 
 
 ![checking_warp_state](images/kernel_3_profiler_warp_stalls.png)
 위 그래프에서 Warp는 대부분 **Stall MIO Throttle**상태에 머물렀음을 확인할 수 있습니다. 이것의 설명은 아래와 같습니다. 
@@ -386,3 +414,4 @@ $ cd docker && docker-compose up
 [1] https://siboehm.com/articles/22/CUDA-MMM  
 [2] https://www.arccompute.io/arc-blog/gpu-101-memory-hierarchy  
 [3] https://docs.nvidia.com/cuda/cuda-c-programming-guide/  
+[4] https://streamhpc.com/blog/2017-01-24/many-threads-can-run-gpu/
