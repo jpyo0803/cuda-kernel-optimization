@@ -79,13 +79,13 @@ int main() {
 
 이해를 돕기위해 두 A, B 행렬 모두 N by N 행렬이라고 가정합니다. 그럼 SGEMM가 연산되며 드는 연산량과 읽고 써야되는 아래와 같습니다.
 
-Total FLOPS: $2\cdot N^{3} + 3\cdot N^{2} \approx 2\cdot N^{3}$  
+Total FLOPS: $2\cdot N^{3} + N^{2} \approx 2\cdot N^{3}$  
 Total data to read: $3 \cdot N^{2} \cdot \text{4 Byte} = 12 \cdot N^{2} \text{ Byte}$  
-Total data to store: $4 \cdot N^{2} \text{ Byte}$  
+Total data to store: $N^{2} \cdot 4 \text{ Byte}$  
 
-먼저 연산을 위해 드는 총 FLOPS는 행렬곱셈 결과 행렬 C의 각 원소마다 dot product를 수행에 대략적으로 $2 \cdot N^{3}$ 만큼의 연산이 듭니다(N번의 곱셈 + N-1번의 덧셈). 다음으로 $\alpha \cdot C_{new} + \beta \cdot C_{old}$ 연산을 위해 총 $3 \cdot N^{2}$ 만큼의 연산량이 필요합니다.
+먼저 연산을 위해 드는 총 FLOPS는 다음과 같이 계산할 수 있습니다. 결과 행렬 C의 각 출력 원소마다 $2\cdot N+1$번의 실수연산이 필요합니다. 이러한 과정을 결과 행렬의 모든 원소에 대해 ($N^{2}$)에 확장하면 총 $2\cdot N^{3}+N^{2}$번의 FLOPS가 듭니다.
 
-연산을 위해 읽어들이는 데이터의 크기는 행렬 A, B, C를 각각 적도도어도 한번씩 읽어들여야하기 때문에 $3 \cdot N^{2} \text{ Byte}$ 만큼을 GMEM로부터 읽어와야 합니다. 결과 행렬 C를 위해 GMEM에 써야하는 데이터의 크기는 $4 \cdot N^{2} \text{ Byte}$ 입니. 
+연산을 위해 읽어들이는 데이터 양은 행렬 A, B, C를 모두 읽어들여야하기 때문에 $3 \cdot N^{2} \cdot 4 \text{ Byte}$ 만큼을 GMEM로부터 읽어와야 합니다. 결과 행렬 C 저장을 위해 GMEM에 써야하는 데이터의 크기는 $N^{2} \cdot 4 \text{ Byte}$ 입니다. 
 
 만약 N을 4096이라고 가정했을때는 아래와 같습니다.
 
@@ -93,32 +93,34 @@ Total FLOPS: 137 GFLOPS
 Total data to read: 201 MB  
 Total data to write: 67 MB  
 
-필자가 현재 사용하는 GPU는 RTX 4060 Ti (8GB)이며 이론적 FP32 연산량 상한은 22 TFLOPS이고 Memory Bandwidth는 288 GB/s입니다. 
+필자가 현재 사용하는 GPU는 RTX 4060 Ti (8GB)이며 이론적으로 해당 하드웨어가 지원하는 FP32 연산량 상한은 22 TFLOPS이고 Memory Bandwidth는 288 GB/s입니다. 
 
-이론적으로는 137 GFLOPS는 RTX 4060 Ti에서 6.2 ms만에 처리되어야 합니다. 메모리 읽기/쓰기에 드는 시간은 0.93 ms 정도 소요되어야 합니다. 
+이론적으로는 137 GFLOPS는 RTX 4060 Ti에서 6.2 ms만에 처리가 가능합니다. 메모리 읽기/쓰기에 드는 시간은 0.93 ms 정도 소요됩니다. 
 
-**앞으로 등장할 각 최적화 버전에서는 입력행렬의 크기는 모두 4096 by 4096으로 가정한다.**
+**앞으로 등장할 각 최적화 버전에서는 입력행렬의 크기는 모두 4096 by 4096으로 가정합니다.**
 
 ## cuBLAS Version (matmul_cublas)
 cuBLAS는 NVIDIA GPU의 연산 자원을 활용하여 BLAS(Basic Linear Algebra Subprograms) 함수를 가속화하는 소프트웨어 라이브러리입니다.
 
-cuBlas를 사용해 행렬곱셈시 약 13 ms의 시간이 소요되었습니다. 이는 이론적 상한인 6.2 ms 대비 약 50%정도의 성능까지 도달함을 보여줍니다. 
+cuBlas를 사용해 행렬곱셈시 약 13 ms의 시간이 소요되었습니다. 이는 이론적 상한인 7.13 ms (6.2 ms + 0.93 ms) 대비 약 45%정도의 성능을 보여줍니다. 
 
 ## Naive Version (matmul_naive)
-Naive버전 행렬곱("matmul_naive.cu")는 CuBLAS의 성능(100% 기준)대비 약 1.3% 정도의 성능밖에 내지 못합니다. 실제로 연산에 소요된 시간은 830 ms 정도로 실제 하드웨어가 제공하는 연산능력을 거의 활용하지 못하는 것을 확인 할 수 있습니다.
+Naive버전 행렬곱("matmul_naive.cu")는 CuBLAS의 성능(100% 기준)대비 약 1.3% 정도의 성능밖에 내지 못합니다. 실제로 연산에 소요된 시간은 830 ms 정도로 실제 하드웨어가 제공하는 연산능력을 거의 활용하지 못하는 것을 확인 할 수 있습니다. 이는 비효율적인 Global Memory 접근 패턴에 의한 성능저하입니다.
 
 ## Global Memory Coalescing (matmul_coalescing)
-Global memory coalescing 버전은 같은 Warp에 속한 Thread들이 연속된 메모리를 접근할때 여러개의 개별 메모리 접근 연산을 하나로 합쳐 한번에 수행하는 기능을 활용합니다. 이때 Thread들이 접근하는 메모리는 연속적(Consecutive)이어야하고 정렬(Aligned)되어있어야 한다. 대부분의 GPU는 32B, 64B, 128B Burst 메모리 접근을 지원합니다. 
+Global memory coalescing 버전은 같은 Warp에 속한 Thread들이 연속적(Consecutive)이고 정렬된(Aligned) 메모리 접근시 여러 개의 메모리 접근을 하나로 합쳐 한번에 수행하는 기능을 활용합니다. 이러한 조건하에 GPU는 32B, 64B, 또는 128B Burst 메모리 접근을 통해 여러 메모리 접근을 하나의 메모리 트랜젝션으로 합쳐 Global Memory 접근 횟수를 줄일수 있습니다.
 
-만약 32개의 Thread가 4B씩 메모리를 접근하는 상황에서 메모리가 연속적이고 정렬되어있으면 32번의 메모리 연산을 1번에 처리할 수 있습니다.
+예를들어 32개의 Thread가 각각 4B 단위의 메모리를 접근할때 메모리가 연속적이고 정렬되어 있으면 32개의 메모리 연산을 하나로 합쳐진 메모리 접근으로 처리할 수 있습니다.
 
-아래는 Naive버전의 메모리 접근 방식을 보여줍니다 (실제로 하나의 Warp에는 32개의 Thread가 있지만 간단하게 표현하기 위해 한 Warp당 8개의 Thread로 가정). 같은 Warp에 속한 Thread들이 메모리를 산발적으로 접근하고 있음을 확인할 수 있습니다.
+아래는 Naive버전의 메모리 접근 방식을 보여줍니다 (실제로 하나의 Warp에는 32개의 Thread가 있지만 간단하게 한 Warp당 8개의 Thread로 표현). 같은 Warp에 속한 Thread들이 메모리를 산발적으로 접근하고 있음을 확인할 수 있습니다.
 ![naive_kernel_mem_coalescing](images/Naive_kernel_mem_coalescing.png)
 ![naive_kernel_mem_access](images/naive_kernel_mem_access.png)
-위 다이어그램에서 A 행렬에 대해 한 Warp에 속한 1번 Thread가 빨강색 영역을 접근, 2번 Thread가 초록색 영역을 시간이 지남에 따라 오른쪽으로 이동한다고 했을때 Warp의 Thread들은 항상 행(세로) 방향으로 가로질러 메모리를 접근(메모리는 가로방향으로 연속적)하기에 Global memory coalescing 기능을 전혀 사용하지 못합니다.
+위 다이어그램에서 A 행렬에 대해 한 Warp에 속한 첫번째 Thread는 빨강색 행을, 두번째 Thread는 초록색 행을 오른쪽 방향으로 순차적으로 접근한다고 할때 Warp의 Thread들은 각 시점에서 항상 열(세로) 방향으로 가로질러 메모리를 접근(반면 데이터는 row-major)하기에 Global memory coalescing 기능을 전혀 사용하지 못합니다. 반면 B 행렬에 대해서는 Warp내에 모든 Thread들은 각 시점에 같은 열의 같은 데이터를 접근해 Within-warp broadcast를 통한 효과적인 메모리 접근이 가능합니다.
+
+![naive vs gmem coalesce compare](images/naive_vs_gmem_coalesce_compare.png)
 
 아래 다이어그램은 GMEM coalescing 기법을 적용했을때 메모리 접근 패턴입니다. 
-이는 단순하게 GMEM coalescing을 활용하는 방법은 한 Warp에 속한 Thread들이  열 방향으로 순차 배치되도록 수정하면 됩니다. 이제 각 Thread들이 메모리를 접근할때 행(세로) 방향으로 접근하는 것이 아니라 열(가로) 방향으로 접근하게 되어 Global memory coalescing 기능을 활용할 수 있게 됩니다.
+이는 단순하게 Naive 방식의 메모리 접근 패턴을 A와 B 행렬에 대해 반전시킨것과 동일합니다. 다시말해 Naive 방식에서 B 행렬 메모리 접근 패턴을 이제는 A 행렬에 대해 수행하도록하고 A 행렬 패턴을 B 행렬에 대신 수행하도록 합니다. 결과적으로 A 행렬은 Within-warp broadcast의 효율적인 메모리 접근 패턴을 갖게되고 B 행렬은 Global Memory Coalescing 기능을 사용할 수 있게 됩니다. 
 ![GMEM_coalescing](images/GMEM_coalescing.png)
 
 ```cpp
