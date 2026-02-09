@@ -127,6 +127,19 @@ int main() {
     B[i] = GenerateRandomFloat();
   }
 
+  {
+    // Warm up GPU
+    MatmulResult warmup;
+    warmup = DoMatmulWithCublas(A, B, M, K, N);
+    warmup = DoMatmulWithNaive(A, B, M, K, N);
+    warmup = DoMatmulWithCoalescing(A, B, M, K, N);
+    warmup = DoMatmulWithSmemBlock(A, B, M, K, N);
+    warmup = DoMatmulWith1DBlockTiling(A, B, M, K, N);
+    warmup = DoMatmulWith2DBlockTiling(A, B, M, K, N);
+    warmup = DoMatmulWithSmemVectorize(A, B, M, K, N);
+    warmup = DoMatmulWithWarpTiling(A, B, M, K, N);
+  }
+
   MatmulResult result_cublas = DoMatmulWithCublas(A, B, M, K, N);
   MatmulResult result_naive = DoMatmulWithNaive(A, B, M, K, N);
   MatmulResult result_coalescing = DoMatmulWithCoalescing(A, B, M, K, N);
