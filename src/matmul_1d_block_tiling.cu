@@ -38,6 +38,15 @@ __global__ void Sgemm1DBlockTiling(int M, int K, int N, float alpha,
     As[ira][ica] = 0.0f;
     Bs[irb][icb] = 0.0f;
 
+    /*
+      SMEM Tiling때처럼 쓰레드당 하나의 데이터를 GMEM에서 SMEM으로 Read.
+      여기서 주의할점은 각 쓰레드는 이제 kTM(=8)크기의 1D 결과를 계산한다는 점임.
+      그렇다면 데이터도 각 쓰레드당 kTM개씩 읽어들여야해보이지만, 실제로는 각 쓰레드당 하나의 데이터를 읽어들이면 됨. 이유는 다음과 같음.
+
+      하나의 블록에서 계산해야하는 결과값의 수는 kBM * kBN인 반면 실제 할당되는 스레드의 수는 (kBM * kBN) / kTM이기 때문에,
+      만약 As의 크기가 kBM * kBK이고, Bs의 크기가 kBK * kBN이라면, 각 쓰레드가 하나의 데이터를 읽어들이는 것만으로도 블록에서 계산해야하는 모든 결과값에 필요한 데이터를 SMEM으로 옮길 수 있음.
+      즉 각 kBM x kBN 블록을 kBK 축으로 더 작은 타일로 나누어서 As와 Bs를 채울때 한 쓰레드가 하나의 데이터만 읽어들이면 되도록 설계되어 있음.
+    */
     if (bk_off + ica < K && br * kBM + ira < M) As[ira][ica] = A[ira * K + ica];
     if (bk_off + irb < K && bc * kBN + icb < N) Bs[irb][icb] = B[irb * N + icb];
 
@@ -45,9 +54,9 @@ __global__ void Sgemm1DBlockTiling(int M, int K, int N, float alpha,
     __syncthreads();
 
     for (int k = 0; k < kBK; ++k) {
-      float b_value = Bs[k][tc];
+      float b_value = Bs[k][tc]; // SMEM에서 Register로 B값 로드
       for (int tm = 0; tm < kTM; ++tm) {
-        values[tm] += As[tr * kTM + tm][k] * b_value;
+        values[tm] += As[tr * kTM + tm][k] * b_value; // b_value를 여러번 재사용
       }
     }
 
@@ -57,6 +66,7 @@ __global__ void Sgemm1DBlockTiling(int M, int K, int N, float alpha,
     __syncthreads();
   }
 
+  // 결과값을 Global Memory에 저장
   for (int i = 0; i < kTM; ++i) {
     C[(tr * kTM + i) * N + tc] =
         alpha * values[i] + beta * C[(tr * kTM + i) * N + tc];

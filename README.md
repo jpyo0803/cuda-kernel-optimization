@@ -190,9 +190,79 @@ NVIDIA GPU 하드웨어에는 SMEM보다 더 빠른 저장장치인 Register가 
 
 1D Register Blocktiling 방식은 각 Thread가 1차원 형태의 다수 결과를 계산합니다. 이 방식은 계산에 필요한 데이터를 SMEM으로부터 Register로 가져오고 여러번 재사용하는 방식을 통해 Arithmetic Intensity(데이터를 메모리로부터 한번 가져와서 얼마나 재사용하는지에 대한 정도)를 증가시킵니다. 
 
-$ \text{Aritemetic Intensity} = (\text{연산 횟수}) / (\text{메모리 접근 바이트 수}) $
+$\text{Aritemetic Intensity} = (\text{연산 횟수}) / (\text{메모리 접근 바이트 수})$
 
 ![1d_block_tiling](images/kernel_4_1D_blocktiling.png)
+
+```cpp
+constexpr int kBM = 64;
+constexpr int kBN = 64;
+constexpr int kBK = 8;
+constexpr int kTM = 8;  // 한 쓰레드가 처리하는 결과 cell의 수
+
+__global__ void Sgemm1DBlockTiling(int M, int K, int N, float alpha,
+                                   const float *A, const float *B, float beta,
+                                   float *C) {
+  int br = blockIdx.y;  // block row
+  int bc = blockIdx.x;  // block col
+
+  int tr = threadIdx.x / kBN;  // thread row
+  int tc = threadIdx.x % kBN;  // thread col
+
+  __shared__ float As[kBM][kBK];
+  __shared__ float Bs[kBK][kBN];
+
+  A += br * kBM * K;
+  B += bc * kBN;
+  C += br * kBM * N + bc * kBN;
+
+  int ira = threadIdx.x / kBK;  // inner row of A
+  int ica = threadIdx.x % kBK;  // inner col of A
+  int irb = threadIdx.x / kBN;  // inner row of B
+  int icb = threadIdx.x % kBN;  // inner col of B
+
+  // 각 스레드가 계산할 결과값 저장 공간
+  float values[kTM] = {0.0f};
+
+  for (int bk_off = 0; bk_off < K; bk_off += kBK) {
+    As[ira][ica] = 0.0f;
+    Bs[irb][icb] = 0.0f;
+
+    /*
+      SMEM Tiling때처럼 쓰레드당 하나의 데이터를 GMEM에서 SMEM으로 Read.
+      여기서 주의할점은 각 쓰레드는 이제 kTM(=8)크기의 1D 결과를 계산한다는 점임.
+      그렇다면 데이터도 각 쓰레드당 kTM개씩 읽어들여야해보이지만, 실제로는 각 쓰레드당 하나의 데이터를 읽어들이면 됨. 이유는 다음과 같음.
+
+      하나의 블록에서 계산해야하는 결과값의 수는 kBM * kBN인 반면 실제 할당되는 스레드의 수는 (kBM * kBN) / kTM이기 때문에,
+      만약 As의 크기가 kBM * kBK이고, Bs의 크기가 kBK * kBN이라면, 각 쓰레드가 하나의 데이터를 읽어들이는 것만으로도 블록에서 계산해야하는 모든 결과값에 필요한 데이터를 SMEM으로 옮길 수 있음.
+      즉 각 kBM x kBN 블록을 kBK 축으로 더 작은 타일로 나누어서 As와 Bs를 채울때 한 쓰레드가 하나의 데이터만 읽어들이면 되도록 설계되어 있음.
+    */
+    if (bk_off + ica < K && br * kBM + ira < M) As[ira][ica] = A[ira * K + ica];
+    if (bk_off + irb < K && bc * kBN + icb < N) Bs[irb][icb] = B[irb * N + icb];
+
+    // 다른 쓰레드도 데이터 로드를 마칠 때까지 대기
+    __syncthreads();
+
+    for (int k = 0; k < kBK; ++k) {
+      float b_value = Bs[k][tc]; // SMEM에서 Register로 B값 로드
+      for (int tm = 0; tm < kTM; ++tm) {
+        values[tm] += As[tr * kTM + tm][k] * b_value; // b_value를 여러번 재사용
+      }
+    }
+
+    A += kBK;
+    B += kBK * N;
+
+    __syncthreads();
+  }
+
+  // 결과값을 Global Memory에 저장
+  for (int i = 0; i < kTM; ++i) {
+    C[(tr * kTM + i) * N + tc] =
+        alpha * values[i] + beta * C[(tr * kTM + i) * N + tc];
+  }
+}
+```
 
 1D block tiling 방식은 cuBLAS 대비 약 20%의 성능을 보입니다. 이전보다 약 2배정도의 성능 향상이 있음을 보입니다.
 
