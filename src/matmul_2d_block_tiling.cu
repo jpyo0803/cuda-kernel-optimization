@@ -17,6 +17,7 @@ __global__ void Sgemm2DBlockTiling(int M, int K, int N, float alpha,
   int br = blockIdx.y;  // block row
   int bc = blockIdx.x;  // block col
 
+  // 결과 블록 당 필요한 스레드 수 계산
   int num_threads_per_block = (kBM * kBN) / (kTM * kTN);
 
   int tr = threadIdx.x / (kBN / kTN);  // thread row
@@ -31,10 +32,12 @@ __global__ void Sgemm2DBlockTiling(int M, int K, int N, float alpha,
 
   int ira = threadIdx.x / kBK;  // inner row of A
   int ica = threadIdx.x % kBK;  // inner col of A
+  // 각 쓰레드가 A 입력 데이터 로드할 때의 간격. 각 Thread는 kBK 개수의 데이터를 로드
   int stride_a = num_threads_per_block / kBK;
 
   int irb = threadIdx.x / kBN;  // inner row of B
   int icb = threadIdx.x % kBN;  // inner col of B
+  // 각 쓰레드가 B 입력 데이터 로드할 때의 간격. 각 Thread는 kBN 개수의 데이터를 로드
   int stride_b = num_threads_per_block / kBN;
 
   // 각 스레드가 계산 결과 저장을 위한 2D 메모리 공간
@@ -45,6 +48,7 @@ __global__ void Sgemm2DBlockTiling(int M, int K, int N, float alpha,
   float reg_n[kTN] = {0.0f};
 
   for (int bk_off = 0; bk_off < K; bk_off += kBK) {
+    // 각 쓰레드는 stride만큼 행을 건너뛰면서 A와 B 데이터를 SMEM으로 로드
     for (int offset = 0; offset < kBM; offset += stride_a) {
       As[ira + offset][ica] = 0.0f;
       if (bk_off + ica < K && br * kBM + ira + offset < M)
@@ -84,6 +88,7 @@ __global__ void Sgemm2DBlockTiling(int M, int K, int N, float alpha,
     __syncthreads();
   }
 
+  // 계산된 결과를 Global Memory에 저장
   for (int i = 0; i < kTM; ++i) {
     for (int j = 0; j < kTN; ++j) {
       C[(tr * kTM + i) * N + (tc * kTN + j)] =
