@@ -42,13 +42,22 @@ __global__ void SgemmSmemVectorize(int M, int K, int N, float alpha,
   float reg_n[kTN] = {0.0f};
 
   for (int bk_off = 0; bk_off < K; bk_off += kBK) {
-    // A의 목표 부분에서 4개의 float을 한번에 로드, A가 4의 배수가 아니면 위험
+    /*
+      GMEM에서 SMEM으로 데이터 로드시 4개의 float을 한번에 로딩해 저장 (LDG.E->LDG.E.128, STG.E->STG.E.128)
+      As에 저장할때 Transpose 하여 저장함으로써 SMEM vectorization 실현 (LDS->LDS.128)
+    */
     float4 tmp = reinterpret_cast<const float4 *>(&A[ira * K + ica * 4])[0];
     As[ira + kBM * ica * 4] = tmp.x;
     As[ira + kBM * (ica * 4 + 1)] = tmp.y;
     As[ira + kBM * (ica * 4 + 2)] = tmp.z;
     As[ira + kBM * (ica * 4 + 3)] = tmp.w;
 
+    /*
+      reinterpret_cast 컴파일러 힌트: 해당 메모리 주소가 Aligned 되어있음을 보장
+      만약 reinterpret_cast를 사용하지 않으면, 컴파일러는 해당 float4 단위
+      메모리의 시작점이 아닐수도 있다고 판단하여, 4개의 float을 한번수에 로딩하는
+      vectorized load 명령어를 사용하지 않음.
+    */
     reinterpret_cast<float4 *>(&Bs[irb * kBN + icb * 4])[0] =
         reinterpret_cast<const float4 *>(&B[irb * N + icb * 4])[0];
     // 다른 쓰레드도 데이터 로드를 마칠 때까지 대기

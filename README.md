@@ -373,17 +373,31 @@ __global__ void Sgemm2DBlockTiling(int M, int K, int N, float alpha,
 성능은 cuBLAS 대비 50% 성능까지 보입니다.
 
 ## Vectorize SMEM and GMEM Accesses
-이전의 GMEM coalescing이 warp 단위에서 여러 thread의 메모리 접근을 하나의 트랜잭션으로 통합하는 최적화라면, vectorized memory access는 thread 단위에서 연속된 여러 요소(float4, int4 등)를 한 번의 명령으로 Load/Store하는 최적화입니다.
+이전의 GMEM에서 SMEM 데이터 로딩은 32bit float 단위로 수행됬습니다. 다음처럼 ```float4``` 데이터 타입을 사용해서 한번에 4개의 32bit float을 GMEM에서 SMEM으로 가져올 수 있습니다.
+
+![kernel version 5](images/kernel_5_detail.png)
+또한 2D Register Tiling 버전(위 다이어그램)에서처럼 As와 Bs가 배치되어 있을경우 행을 가로질러 메모리를 접근하기에 Bs에서 4개의 float값을 한번의 명령어(LDS.128)로 Register로 가져올수 있었지만 As의 경우는 열을 가로질러야 했기때문에 LDS.128을 사용할 수 없었습니다.
+
+따라서 다음과 같이 As를 Transpose 시키면 Bs에서처럼 LDS.128을 활성화시킬 수 있습니다. Transpose는 GMEM A에서 SMEM으로 데이터를 옮기는 과정에서 수행할 수 있습니다.
+![kernel version 6](images/kernel_6_transpose.png)
 
 ```cpp
+    /*
+      GMEM에서 SMEM으로 데이터 로드시 4개의 float을 한번에 로딩해 저장 (LDG.E->LDG.E.128, STG.E->STG.E.128)
+      As에 저장할때 Transpose 하여 저장함으로써 SMEM vectorization 실현 (LDS->LDS.128)
+    */
     float4 tmp = reinterpret_cast<const float4 *>(&A[ira * K + ica * 4])[0];
-    
-    // 4개의 float을 한번에 로드 
     As[ira + kBM * ica * 4] = tmp.x;
     As[ira + kBM * (ica * 4 + 1)] = tmp.y;
     As[ira + kBM * (ica * 4 + 2)] = tmp.z;
     As[ira + kBM * (ica * 4 + 3)] = tmp.w;
 
+    /*
+      reinterpret_cast 컴파일러 힌트: 해당 메모리 주소가 Aligned 되어있음을 보장
+      만약 reinterpret_cast를 사용하지 않으면, 컴파일러는 해당 float4 단위
+      메모리의 시작점이 아닐수도 있다고 판단하여, 4개의 float을 한번수에 로딩하는
+      vectorized load 명령어를 사용하지 않음.
+    */
     reinterpret_cast<float4 *>(&Bs[irb * kBN + icb * 4])[0] =
         reinterpret_cast<const float4 *>(&B[irb * N + icb * 4])[0];
 ```
